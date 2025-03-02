@@ -36,7 +36,7 @@ class ChatAppGUI:
         self.style.configure(
             "Orange.TButton",
             background=self.colors["primary"],
-            foreground="white",
+            foreground="#222222",
             font=("Arial", 10, "bold"),
         )
 
