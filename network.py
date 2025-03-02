@@ -34,9 +34,7 @@ class ChatNetwork:
             try:
                 data = peer_socket.recv(4096).decode("utf-8")
                 if not data:
-                    if self._try_reconnect(address):
-                        print(f"DEBUG: Reconnected to {address}", file=sys.stderr)
-                        continue
+                    # Don't try to reconnect from handler - just break and clean up
                     break
 
                 # Update heartbeat on any data received
@@ -75,21 +73,44 @@ class ChatNetwork:
                     break
             except Exception as e:
                 print(f"Connection error with {address}: {e}")
-                if not self._try_reconnect(address):
-                    break
+                break  # Remove reconnection attempt from here
 
         self._remove_peer(address)
 
     def _try_reconnect(self, address: Tuple[str, int], max_attempts: int = 3) -> bool:
         """Attempt to reconnect to a peer"""
+        # Prevent reconnection to self address
+        if address[0] in ("localhost", "127.0.0.1") and address[1] == self.port:
+            return False
+
+        # Check if we already have a connection to this peer
+        if address in self.peers and self.peers[address]:
+            try:
+                # Test if connection is still valid
+                self.peers[address].sendall(b"")
+                return True  # Connection still active
+            except:
+                pass  # Connection is broken, proceed with reconnection
+
         for _ in range(max_attempts):
             try:
+                print(f"Attempting to reconnect to {address}...")
                 new_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 new_socket.connect(address)
                 self.peers[address] = new_socket
                 self.last_heartbeat[address] = time.time()
+                print(f"Successfully reconnected to {address}")
+
+                # Start handler for this peer
+                thread = threading.Thread(
+                    target=self._handle_peer, args=(new_socket, address)
+                )
+                thread.daemon = True
+                thread.start()
+
                 return True
-            except:
+            except Exception as e:
+                print(f"Reconnection attempt failed: {e}")
                 time.sleep(1)
         return False
 

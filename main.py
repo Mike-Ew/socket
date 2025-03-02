@@ -1,5 +1,6 @@
 import sys
 import threading
+import os
 from chat import ChatRoom
 
 
@@ -73,10 +74,15 @@ class ChatCLI:
             print("Usage: /sendfile <filename>")
             return
         filename = args[0]
+
+        if not os.path.exists(filename):
+            print(f"Error: File '{filename}' not found")
+            return
+
         if self.chat_room.send_file(filename):
             print(f"File {filename} sent successfully")
         else:
-            print("Failed to send file")
+            print("Failed to send file. No peers connected.")
 
     def create_group(self, *args):
         if len(args) != 1:

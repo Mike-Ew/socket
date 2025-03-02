@@ -4,6 +4,7 @@ import json
 from typing import Dict, Set, Tuple
 import logging
 from network import ChatNetwork
+from file_transfer import FileTransferManager
 
 
 class MessageType(Enum):
@@ -39,6 +40,7 @@ class ChatRoom:
         self.message_history: list = []
         self.MAX_HISTORY = 100
         self.message_callbacks = []
+        self.file_manager = FileTransferManager(self)
 
     def register_message_callback(self, callback):
         """Register a callback function to be called when a message is received"""
@@ -48,9 +50,43 @@ class ChatRoom:
         """Start the chat room"""
         self.network.start(message_callback=self._handle_message)
         self._set_status(UserStatus.ONLINE)
+        # Initiate periodic peer list refresh
+        self._start_peer_refresh_timer()
+
+    def _start_peer_refresh_timer(self):
+        """Start a timer to periodically refresh the peer list"""
+        import threading
+
+        if hasattr(self, "_peer_refresh_timer") and self._peer_refresh_timer:
+            self._peer_refresh_timer.cancel()
+
+        self._peer_refresh_timer = threading.Timer(30.0, self._refresh_peer_list)
+        self._peer_refresh_timer.daemon = True
+        self._peer_refresh_timer.start()
+
+    def _refresh_peer_list(self):
+        """Refresh the peer list and notify callbacks"""
+        # Send presence update to ensure all peers are aware of each other
+        self._send_presence_update()
+
+        # Notify callbacks about current user list
+        system_message = {
+            "type": "user_update",
+            "users": self.get_online_users(),
+            "timestamp": time.time(),
+        }
+        for callback in self.message_callbacks:
+            callback(system_message)
+
+        # Restart timer
+        self._start_peer_refresh_timer()
 
     def connect_to_peer(self, peer_host: str, peer_port: int) -> bool:
         """Connect to a peer and exchange presence info"""
+        # Don't connect to self
+        if peer_host in ("localhost", "127.0.0.1") and peer_port == self.network.port:
+            return False
+
         success = self.network.connect_to_peer(peer_host, peer_port)
         if success:
             # Send immediate presence update after connection
@@ -62,6 +98,9 @@ class ChatRoom:
             }
             peer_address = (peer_host, peer_port)
             self.network.send_to_peer(peer_address, presence_message)
+
+            # Trigger peer list refresh
+            self._refresh_peer_list()
         return success
 
     def send_message(self, message: str):
@@ -96,6 +135,19 @@ class ChatRoom:
             # Handle system messages
             self._handle_system_message(message)
 
+        # Handle file transfer related messages - extended to handle more message types
+        elif msg_type in [
+            "file_metadata",
+            "file_chunk",
+            "file_transfer_complete",
+            "file_chunk_ack",
+            "file_chunk_request",
+        ]:
+            notification = self.file_manager.handle_file_message(message)
+            if notification:
+                for callback in self.message_callbacks:
+                    callback(notification)
+
     def _handle_chat_message(self, sender_address: Tuple[str, int], message: dict):
         """Process chat messages"""
         self._add_to_history(message)
@@ -116,18 +168,26 @@ class ChatRoom:
 
         if sender_address not in self.users:
             self.users[sender_address] = ChatUser(username, sender_address)
+            # New user connected - notify
+            system_message = {
+                "type": MessageType.SYSTEM.value,
+                "content": f"{username} connected",
+                "timestamp": time.time(),
+            }
+            for callback in self.message_callbacks:
+                callback(system_message)
 
         self.users[sender_address].status = status
         self.users[sender_address].last_seen = time.time()
 
-        # Notify callbacks about user changes
-        system_message = {
-            "type": MessageType.SYSTEM.value,
-            "content": f"{username} is now {status.value}",
+        # Always notify callbacks about user list changes
+        user_update = {
+            "type": "user_update",
+            "users": self.get_online_users(),
             "timestamp": time.time(),
         }
         for callback in self.message_callbacks:
-            callback({"type": "user_update", "users": self.get_online_users()})
+            callback(user_update)
 
     def _send_presence_update(self):
         """Send presence update to all peers"""
@@ -168,7 +228,11 @@ class ChatRoom:
 
     def stop(self):
         """Stop the chat room"""
+        if hasattr(self, "_peer_refresh_timer") and self._peer_refresh_timer:
+            self._peer_refresh_timer.cancel()
         self._set_status(UserStatus.OFFLINE)
+        if hasattr(self.file_manager, "stop"):
+            self.file_manager.stop()
         self.network.stop()
 
     def get_online_users(self) -> list:
@@ -182,3 +246,7 @@ class ChatRoom:
     def get_message_history(self):
         """Get message history"""
         return self.message_history
+
+    def send_file(self, file_path: str) -> bool:
+        """Send a file to all peers"""
+        return self.file_manager.send_file(file_path)

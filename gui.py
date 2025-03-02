@@ -1,6 +1,7 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext, simpledialog, messagebox
+from tkinter import ttk, scrolledtext, simpledialog, messagebox, filedialog
 import time
+import os
 from datetime import datetime
 from chat import ChatRoom
 
@@ -171,6 +172,15 @@ class ChatAppGUI:
         # Add yourself to users list
         self.users_list.insert(tk.END, f"{self.username} (You)")
 
+        # Add manual refresh button for users list
+        refresh_btn = ttk.Button(
+            self.users_frame,
+            text="Refresh",
+            style="Orange.TButton",
+            command=self.refresh_users_list,
+        )
+        refresh_btn.pack(fill="x", padx=5, pady=5)
+
         # Right panel for chat
         self.chat_frame = ttk.Frame(self.paned)
         self.paned.add(self.chat_frame, weight=3)
@@ -230,6 +240,16 @@ class ChatAppGUI:
             "sender", foreground=self.colors["primary"], font=("Arial", 11, "bold")
         )
 
+        # Add a frame for active file transfers below the chat display
+        self.transfers_frame = ttk.LabelFrame(self.chat_frame, text="Active Transfers")
+        self.transfers_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        # Dictionary to track transfer progress bars
+        self.transfer_progress = {}
+
+        # Hide transfers frame initially
+        self.transfers_frame.pack_forget()
+
         # Message input area
         input_frame = ttk.Frame(self.chat_frame)
         input_frame.pack(fill="x", padx=10, pady=10)
@@ -237,6 +257,15 @@ class ChatAppGUI:
         self.message_input = ttk.Entry(input_frame, font=("Arial", 11))
         self.message_input.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.message_input.bind("<Return>", lambda e: self.send_message())
+
+        # Add file send button
+        file_btn = ttk.Button(
+            input_frame,
+            text="Send File",
+            style="Orange.TButton",
+            command=self.send_file,
+        )
+        file_btn.pack(side="right", padx=5)
 
         send_btn = ttk.Button(
             input_frame, text="Send", style="Orange.TButton", command=self.send_message
@@ -291,11 +320,121 @@ class ChatAppGUI:
             # No peers to send to
             self.add_system_message("No peers connected. Message not sent.")
 
+    def send_file(self):
+        """Open file dialog and send selected file"""
+        file_path = filedialog.askopenfilename(
+            title="Select File to Send", filetypes=[("All Files", "*.*")]
+        )
+
+        if file_path:
+            # Show the transfers frame when sending a file
+            self.transfers_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+            if self.chat_room.send_file(file_path):
+                self.add_system_message(f"Sending file: {os.path.basename(file_path)}")
+
+                # Add a progress bar for this transfer
+                transfer_id = (
+                    f"sending_{int(time.time())}_{os.path.basename(file_path)}"
+                )
+                self._add_transfer_progress(
+                    transfer_id, f"Sending: {os.path.basename(file_path)}"
+                )
+
+                # Start progress monitoring
+                self._update_transfer_progress()
+            else:
+                messagebox.showerror(
+                    "Error", "Failed to send file. No peers connected."
+                )
+
+    def _add_transfer_progress(self, transfer_id, label_text):
+        """Add a progress bar for a file transfer"""
+        # Create a frame for this transfer
+        transfer_frame = ttk.Frame(self.transfers_frame)
+        transfer_frame.pack(fill="x", padx=5, pady=2)
+
+        # Label for the transfer
+        transfer_label = ttk.Label(transfer_frame, text=label_text)
+        transfer_label.pack(side="left", padx=5)
+
+        # Progress bar
+        progress = ttk.Progressbar(transfer_frame, length=200, mode="determinate")
+        progress.pack(side="left", fill="x", expand=True, padx=5)
+
+        # Status label
+        status_label = ttk.Label(transfer_frame, text="0%")
+        status_label.pack(side="left", padx=5)
+
+        # Store references
+        self.transfer_progress[transfer_id] = {
+            "frame": transfer_frame,
+            "progress": progress,
+            "status": status_label,
+            "start_time": time.time(),
+        }
+
+    def _update_transfer_progress(self):
+        """Update all transfer progress bars"""
+        if not hasattr(self.chat_room, "file_manager"):
+            return
+
+        for transfer_id in list(self.transfer_progress.keys()):
+            # Get current status from file manager
+            status = None
+
+            # For real transfer IDs (not our temporary ones for UI)
+            if not transfer_id.startswith("sending_"):
+                status = self.chat_room.file_manager.get_transfer_status(transfer_id)
+
+            if status:
+                # Update progress bar
+                progress_widget = self.transfer_progress[transfer_id]["progress"]
+                status_label = self.transfer_progress[transfer_id]["status"]
+
+                progress_widget["value"] = status["progress"]
+                status_label["text"] = f"{int(status['progress'])}%"
+
+                # Remove completed transfers after a delay
+                if (
+                    status["status"] == "completed"
+                    and time.time() - self.transfer_progress[transfer_id]["start_time"]
+                    > 5
+                ):
+                    self.transfer_progress[transfer_id]["frame"].destroy()
+                    del self.transfer_progress[transfer_id]
+            else:
+                # For UI-only transfer IDs or if transfer is no longer tracked
+                elapsed = (
+                    time.time() - self.transfer_progress[transfer_id]["start_time"]
+                )
+                if elapsed > 30:  # Remove after 30 seconds if no updates
+                    self.transfer_progress[transfer_id]["frame"].destroy()
+                    del self.transfer_progress[transfer_id]
+
+        # Hide transfers frame if empty
+        if not self.transfer_progress:
+            self.transfers_frame.pack_forget()
+
+        # Schedule next update
+        self.root.after(1000, self._update_transfer_progress)
+
     def handle_message(self, message):
         """Callback for handling incoming messages from the chat room"""
         if message.get("type") == "user_update":
             self.update_users_list(message.get("users", []))
             return
+
+        # Show transfers frame when receiving a file
+        if message.get("type") == "system" and "Receiving file" in message.get(
+            "content", ""
+        ):
+            self.transfers_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+            # Extract transfer ID if possible
+            content = message.get("content", "")
+            if "transfer_id" in message:
+                transfer_id = message["transfer_id"]
 
         self.display_message(message)
 
@@ -357,6 +496,17 @@ class ChatAppGUI:
         for user in users:
             if user != self.username:
                 self.users_list.insert(tk.END, user)
+
+        # Update window title with user count
+        user_count = len(users) if self.username not in users else len(users) + 1
+        self.root.title(f"P2P Chat - {self.username} - {user_count} users online")
+
+    def refresh_users_list(self):
+        """Manually trigger a refresh of the users list"""
+        if self.chat_room:
+            self.add_system_message("Refreshing peer list...")
+            # This will trigger presence updates and refresh the list
+            self.chat_room._refresh_peer_list()
 
     def on_close(self):
         """Handle window closing"""
